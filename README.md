@@ -79,6 +79,7 @@ Set `LICENSE_PRIVATE_KEY` to the PKCS8 private key. Keep it only in server envir
 - `npm run db:migrate` applies SQL migrations once, tracked in `schema_migrations`.
 - `npm run admin:create` creates or updates an admin user.
 - `npm run db:verify` runs rollback-only database checks using test-prefixed records.
+- `npm test` runs the same rollback-only database verification.
 - `npm run typecheck`, `npm run lint`, and `npm run build` validate the app.
 
 ## Required Environment Variables
@@ -86,10 +87,13 @@ Set `LICENSE_PRIVATE_KEY` to the PKCS8 private key. Keep it only in server envir
 - `DATABASE_URL`
 - `AUTH_SECRET`
 - `LICENSE_PRIVATE_KEY`
-
-Optional:
-
-- `NEXT_PUBLIC_APP_NAME`
+- `COMMUNICATION_ENCRYPTION_KEY`
+- `META_GRAPH_API_VERSION`
+- `META_APP_SECRET`
+- `META_WEBHOOK_VERIFY_TOKEN`
+- `COMMUNICATION_CRON_SECRET`
+- `COMMUNICATION_GATEWAY_BASE_URL`
+- `COMMUNICATION_PROVIDER_MODE`
 
 ## License APIs
 
