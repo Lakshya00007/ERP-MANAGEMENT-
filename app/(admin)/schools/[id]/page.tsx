@@ -1,8 +1,8 @@
 import { notFound } from "next/navigation";
 import { StatusBadge } from "@/components/StatusBadge";
 import { createDeviceAction, createPaymentAction, updateSchoolAction } from "@/lib/actions";
+import { queryOne, queryRows } from "@/lib/db";
 import { formatDateTime } from "@/lib/format";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import type { Device, License, Payment, School } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -13,22 +13,39 @@ type PageProps = {
 
 export default async function SchoolProfilePage({ params }: PageProps) {
   const { id } = await params;
-  const supabase = createSupabaseAdminClient();
-  const [schoolResult, devicesResult, licensesResult, paymentsResult] = await Promise.all([
-    supabase.from("schools").select("*").eq("id", id).maybeSingle(),
-    supabase.from("devices").select("*").eq("school_id", id).order("created_at", { ascending: false }),
-    supabase.from("licenses").select("*").eq("school_id", id).order("created_at", { ascending: false }),
-    supabase.from("payments").select("*").eq("school_id", id).order("created_at", { ascending: false }),
+  const [school, devices, licenses, payments] = await Promise.all([
+    queryOne<School>(
+      `select *
+       from schools
+       where id = $1`,
+      [id],
+    ),
+    queryRows<Device>(
+      `select *
+       from devices
+       where school_id = $1
+       order by created_at desc`,
+      [id],
+    ),
+    queryRows<License>(
+      `select *
+       from licenses
+       where school_id = $1
+       order by created_at desc`,
+      [id],
+    ),
+    queryRows<Payment>(
+      `select *
+       from payments
+       where school_id = $1
+       order by created_at desc`,
+      [id],
+    ),
   ]);
 
-  if (!schoolResult.data) {
+  if (!school) {
     notFound();
   }
-
-  const school = schoolResult.data as School;
-  const devices = (devicesResult.data ?? []) as Device[];
-  const licenses = (licensesResult.data ?? []) as License[];
-  const payments = (paymentsResult.data ?? []) as Payment[];
 
   return (
     <div className="space-y-6">

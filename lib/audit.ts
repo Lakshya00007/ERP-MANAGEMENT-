@@ -1,6 +1,7 @@
 import "server-only";
 
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { randomUUID } from "node:crypto";
+import { sql } from "@/lib/db";
 
 type AuditInput = {
   actorId: string | null;
@@ -11,17 +12,15 @@ type AuditInput = {
 };
 
 export async function writeAuditLog(input: AuditInput) {
-  const supabase = createSupabaseAdminClient();
-
-  const { error } = await supabase.from("audit_logs").insert({
-    actor_id: input.actorId,
-    action: input.action,
-    entity_type: input.entityType ?? null,
-    entity_id: input.entityId ?? null,
-    details: input.details ?? {},
-  });
-
-  if (error) {
-    throw new Error(`Audit log failed: ${error.message}`);
-  }
+  await sql`
+    insert into audit_logs (id, actor_id, action, entity_type, entity_id, details)
+    values (
+      ${randomUUID()},
+      ${input.actorId},
+      ${input.action},
+      ${input.entityType ?? null},
+      ${input.entityId ?? null},
+      ${JSON.stringify(input.details ?? {})}::jsonb
+    )
+  `;
 }

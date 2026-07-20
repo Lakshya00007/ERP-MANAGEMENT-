@@ -1,7 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getRequestIp, readBodyString, requireBodyString } from "@/lib/api";
-import { writeAuditLog } from "@/lib/audit";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { getDb, queryOne } from "@/lib/db";
 import type { Device, License } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -16,7 +16,7 @@ type CheckResponse = {
   maintenanceExpired?: boolean;
 };
 
-async function saveCheckin(input: {
+type CheckinInput = {
   licenseId: string | null;
   deviceId: string | null;
   schoolId: string | null;
@@ -25,35 +25,105 @@ async function saveCheckin(input: {
   os: string | null;
   ipAddress: string | null;
   notes?: string;
-}) {
-  const supabase = createSupabaseAdminClient();
-  await supabase.from("license_checkins").insert({
-    license_id: input.licenseId,
-    device_id: input.deviceId,
-    school_id: input.schoolId,
-    status_returned: input.statusReturned,
-    app_version: input.appVersion,
-    os: input.os,
-    ip_address: input.ipAddress,
-    notes: input.notes ?? null,
-  });
+};
+
+async function recordCheckinAndTouch(input: CheckinInput) {
+  const db = getDb();
+
+  if (!input.deviceId) {
+    await db.transaction((tx) => [
+      tx`
+        insert into license_checkins (
+          id, license_id, device_id, school_id, status_returned, app_version, os, ip_address, notes
+        )
+        values (
+          ${randomUUID()}, ${input.licenseId}, ${input.deviceId}, ${input.schoolId},
+          ${input.statusReturned}, ${input.appVersion}, ${input.os}, ${input.ipAddress},
+          ${input.notes ?? null}
+        )
+      `,
+    ]);
+    return;
+  }
+
+  await db.transaction((tx) => [
+    tx`
+      insert into license_checkins (
+        id, license_id, device_id, school_id, status_returned, app_version, os, ip_address, notes
+      )
+      values (
+        ${randomUUID()}, ${input.licenseId}, ${input.deviceId}, ${input.schoolId},
+        ${input.statusReturned}, ${input.appVersion}, ${input.os}, ${input.ipAddress},
+        ${input.notes ?? null}
+      )
+    `,
+    tx`
+      update devices
+      set app_version = ${input.appVersion},
+          os = ${input.os},
+          last_seen_at = now(),
+          last_ip = ${input.ipAddress}
+      where device_id = ${input.deviceId}
+    `,
+  ]);
 }
 
-async function touchDevice(deviceId: string, appVersion: string | null, os: string | null, ipAddress: string | null) {
-  const supabase = createSupabaseAdminClient();
-  await supabase
-    .from("devices")
-    .update({
-      app_version: appVersion,
+async function recordExpiredCheck(
+  license: License,
+  deviceId: string,
+  appVersion: string | null,
+  os: string | null,
+  ipAddress: string | null,
+) {
+  const db = getDb();
+
+  if (license.status === "Expired") {
+    await recordCheckinAndTouch({
+      licenseId: license.license_id,
+      deviceId,
+      schoolId: license.school_id,
+      statusReturned: "Expired",
+      appVersion,
       os,
-      last_seen_at: new Date().toISOString(),
-      last_ip: ipAddress,
-    })
-    .eq("device_id", deviceId);
+      ipAddress,
+    });
+    return;
+  }
+
+  await db.transaction((tx) => [
+    tx`
+      update licenses
+      set status = ${"Expired"}
+      where license_id = ${license.license_id}
+    `,
+    tx`
+      insert into audit_logs (id, actor_id, action, entity_type, entity_id, details)
+      values (
+        ${randomUUID()}, ${null}, ${"license.expired_on_check"}, ${"license"}, ${license.license_id},
+        ${JSON.stringify({ expiresAt: license.expires_at })}::jsonb
+      )
+    `,
+    tx`
+      insert into license_checkins (
+        id, license_id, device_id, school_id, status_returned, app_version, os, ip_address
+      )
+      values (
+        ${randomUUID()}, ${license.license_id}, ${deviceId}, ${license.school_id},
+        ${"Expired"}, ${appVersion}, ${os}, ${ipAddress}
+      )
+    `,
+    tx`
+      update devices
+      set app_version = ${appVersion},
+          os = ${os},
+          last_seen_at = now(),
+          last_ip = ${ipAddress}
+      where device_id = ${deviceId}
+    `,
+  ]);
 }
 
 export async function POST(request: Request) {
-  const supabase = createSupabaseAdminClient();
   const now = new Date();
   const serverTime = now.toISOString();
   const ipAddress = getRequestIp(request);
@@ -64,18 +134,15 @@ export async function POST(request: Request) {
     const deviceId = requireBodyString(body, "deviceId");
     const appVersion = readBodyString(body, "appVersion");
     const os = readBodyString(body, "os");
-    const { data: license, error } = await supabase
-      .from("licenses")
-      .select("*")
-      .eq("license_id", licenseId)
-      .maybeSingle<License>();
-
-    if (error) {
-      throw new Error(error.message);
-    }
+    const license = await queryOne<License>(
+      `select *
+       from licenses
+       where license_id = $1`,
+      [licenseId],
+    );
 
     if (!license) {
-      await saveCheckin({
+      await recordCheckinAndTouch({
         licenseId,
         deviceId,
         schoolId: null,
@@ -85,7 +152,6 @@ export async function POST(request: Request) {
         ipAddress,
         notes: "License not found",
       });
-      await touchDevice(deviceId, appVersion, os, ipAddress);
 
       return NextResponse.json<CheckResponse>({
         valid: false,
@@ -98,7 +164,7 @@ export async function POST(request: Request) {
     }
 
     if (license.device_id !== deviceId) {
-      await saveCheckin({
+      await recordCheckinAndTouch({
         licenseId,
         deviceId,
         schoolId: license.school_id,
@@ -108,7 +174,6 @@ export async function POST(request: Request) {
         ipAddress,
         notes: `Expected ${license.device_id}`,
       });
-      await touchDevice(deviceId, appVersion, os, ipAddress);
 
       return NextResponse.json<CheckResponse>({
         valid: false,
@@ -120,16 +185,15 @@ export async function POST(request: Request) {
       });
     }
 
-    const { data: device } = await supabase
-      .from("devices")
-      .select("*")
-      .eq("device_id", deviceId)
-      .maybeSingle<Device>();
-
-    await touchDevice(deviceId, appVersion, os, ipAddress);
+    const device = await queryOne<Device>(
+      `select *
+       from devices
+       where device_id = $1`,
+      [deviceId],
+    );
 
     if (device?.status === "Suspended" || device?.status === "Revoked") {
-      await saveCheckin({
+      await recordCheckinAndTouch({
         licenseId,
         deviceId,
         schoolId: license.school_id,
@@ -150,7 +214,7 @@ export async function POST(request: Request) {
     }
 
     if (license.status === "Suspended" || license.status === "Revoked") {
-      await saveCheckin({
+      await recordCheckinAndTouch({
         licenseId,
         deviceId,
         schoolId: license.school_id,
@@ -173,26 +237,7 @@ export async function POST(request: Request) {
     const expired = Boolean(license.expires_at && new Date(license.expires_at).getTime() < now.getTime());
 
     if (license.status === "Expired" || expired) {
-      if (license.status !== "Expired") {
-        await supabase.from("licenses").update({ status: "Expired" }).eq("license_id", licenseId);
-        await writeAuditLog({
-          actorId: null,
-          action: "license.expired_on_check",
-          entityType: "license",
-          entityId: licenseId,
-          details: { expiresAt: license.expires_at },
-        });
-      }
-
-      await saveCheckin({
-        licenseId,
-        deviceId,
-        schoolId: license.school_id,
-        statusReturned: "Expired",
-        appVersion,
-        os,
-        ipAddress,
-      });
+      await recordExpiredCheck(license, deviceId, appVersion, os, ipAddress);
 
       return NextResponse.json<CheckResponse>({
         valid: false,
@@ -208,7 +253,7 @@ export async function POST(request: Request) {
       license.maintenance_until && new Date(license.maintenance_until).getTime() < now.getTime(),
     );
 
-    await saveCheckin({
+    await recordCheckinAndTouch({
       licenseId,
       deviceId,
       schoolId: license.school_id,
@@ -228,7 +273,7 @@ export async function POST(request: Request) {
       serverTime,
     });
   } catch (error) {
-    await saveCheckin({
+    await recordCheckinAndTouch({
       licenseId: null,
       deviceId: null,
       schoolId: null,

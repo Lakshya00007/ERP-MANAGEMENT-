@@ -1,10 +1,10 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireAdminPage } from "@/lib/auth";
-import { writeAuditLog } from "@/lib/audit";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { getDb } from "@/lib/db";
 
 function readString(formData: FormData, key: string) {
   const value = formData.get(key);
@@ -23,12 +23,14 @@ function readRequiredString(formData: FormData, key: string) {
 
 function readInteger(formData: FormData, key: string) {
   const value = readString(formData, key);
-  return value ? Number.parseInt(value, 10) : null;
+  const parsed = value ? Number.parseInt(value, 10) : null;
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 export async function createSchoolAction(formData: FormData) {
   const { user } = await requireAdminPage();
-  const supabase = createSupabaseAdminClient();
+  const db = getDb();
+  const id = randomUUID();
   const payload = {
     school_name: readRequiredString(formData, "school_name"),
     contact_person: readString(formData, "contact_person"),
@@ -41,27 +43,32 @@ export async function createSchoolAction(formData: FormData) {
     status: readString(formData, "status") ?? "Active",
   };
 
-  const { data, error } = await supabase.from("schools").insert(payload).select("id").single();
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  await writeAuditLog({
-    actorId: user.id,
-    action: "school.created",
-    entityType: "school",
-    entityId: data.id,
-    details: { school_name: payload.school_name },
-  });
+  await db.transaction((tx) => [
+    tx`
+      insert into schools (
+        id, school_name, contact_person, phone, email, address, city, state, notes, status
+      )
+      values (
+        ${id}, ${payload.school_name}, ${payload.contact_person}, ${payload.phone}, ${payload.email},
+        ${payload.address}, ${payload.city}, ${payload.state}, ${payload.notes}, ${payload.status}
+      )
+    `,
+    tx`
+      insert into audit_logs (id, actor_id, action, entity_type, entity_id, details)
+      values (
+        ${randomUUID()}, ${user.id}, ${"school.created"}, ${"school"}, ${id},
+        ${JSON.stringify({ school_name: payload.school_name })}::jsonb
+      )
+    `,
+  ]);
 
   revalidatePath("/schools");
-  redirect(`/schools/${data.id}`);
+  redirect(`/schools/${id}`);
 }
 
 export async function updateSchoolAction(formData: FormData) {
   const { user } = await requireAdminPage();
-  const supabase = createSupabaseAdminClient();
+  const db = getDb();
   const id = readRequiredString(formData, "id");
   const payload = {
     school_name: readRequiredString(formData, "school_name"),
@@ -75,19 +82,29 @@ export async function updateSchoolAction(formData: FormData) {
     status: readString(formData, "status") ?? "Active",
   };
 
-  const { error } = await supabase.from("schools").update(payload).eq("id", id);
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  await writeAuditLog({
-    actorId: user.id,
-    action: "school.updated",
-    entityType: "school",
-    entityId: id,
-    details: payload,
-  });
+  await db.transaction((tx) => [
+    tx`
+      update schools
+      set
+        school_name = ${payload.school_name},
+        contact_person = ${payload.contact_person},
+        phone = ${payload.phone},
+        email = ${payload.email},
+        address = ${payload.address},
+        city = ${payload.city},
+        state = ${payload.state},
+        notes = ${payload.notes},
+        status = ${payload.status}
+      where id = ${id}
+    `,
+    tx`
+      insert into audit_logs (id, actor_id, action, entity_type, entity_id, details)
+      values (
+        ${randomUUID()}, ${user.id}, ${"school.updated"}, ${"school"}, ${id},
+        ${JSON.stringify(payload)}::jsonb
+      )
+    `,
+  ]);
 
   revalidatePath("/schools");
   revalidatePath(`/schools/${id}`);
@@ -95,7 +112,8 @@ export async function updateSchoolAction(formData: FormData) {
 
 export async function createDeviceAction(formData: FormData) {
   const { user } = await requireAdminPage();
-  const supabase = createSupabaseAdminClient();
+  const db = getDb();
+  const id = randomUUID();
   const payload = {
     school_id: readRequiredString(formData, "school_id"),
     device_id: readRequiredString(formData, "device_id"),
@@ -105,49 +123,55 @@ export async function createDeviceAction(formData: FormData) {
     status: readString(formData, "status") ?? "Active",
   };
 
-  const { data, error } = await supabase.from("devices").insert(payload).select("id,device_id").single();
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  await writeAuditLog({
-    actorId: user.id,
-    action: "device.registered",
-    entityType: "device",
-    entityId: data.device_id,
-    details: payload,
-  });
+  await db.transaction((tx) => [
+    tx`
+      insert into devices (id, school_id, device_id, device_name, os, app_version, status)
+      values (
+        ${id}, ${payload.school_id}, ${payload.device_id}, ${payload.device_name},
+        ${payload.os}, ${payload.app_version}, ${payload.status}
+      )
+    `,
+    tx`
+      insert into audit_logs (id, actor_id, action, entity_type, entity_id, details)
+      values (
+        ${randomUUID()}, ${user.id}, ${"device.registered"}, ${"device"}, ${payload.device_id},
+        ${JSON.stringify(payload)}::jsonb
+      )
+    `,
+  ]);
 
   revalidatePath("/devices");
+  revalidatePath(`/schools/${payload.school_id}`);
 }
 
 export async function updateDeviceStatusAction(formData: FormData) {
   const { user } = await requireAdminPage();
-  const supabase = createSupabaseAdminClient();
+  const db = getDb();
   const deviceId = readRequiredString(formData, "device_id");
   const status = readRequiredString(formData, "status");
 
-  const { error } = await supabase.from("devices").update({ status }).eq("device_id", deviceId);
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  await writeAuditLog({
-    actorId: user.id,
-    action: "device.status_updated",
-    entityType: "device",
-    entityId: deviceId,
-    details: { status },
-  });
+  await db.transaction((tx) => [
+    tx`
+      update devices
+      set status = ${status}
+      where device_id = ${deviceId}
+    `,
+    tx`
+      insert into audit_logs (id, actor_id, action, entity_type, entity_id, details)
+      values (
+        ${randomUUID()}, ${user.id}, ${"device.status_updated"}, ${"device"}, ${deviceId},
+        ${JSON.stringify({ status })}::jsonb
+      )
+    `,
+  ]);
 
   revalidatePath("/devices");
 }
 
 export async function createPaymentAction(formData: FormData) {
   const { user } = await requireAdminPage();
-  const supabase = createSupabaseAdminClient();
+  const db = getDb();
+  const id = randomUUID();
   const payload = {
     school_id: readRequiredString(formData, "school_id"),
     license_id: readString(formData, "license_id"),
@@ -159,42 +183,50 @@ export async function createPaymentAction(formData: FormData) {
     notes: readString(formData, "notes"),
   };
 
-  const { data, error } = await supabase.from("payments").insert(payload).select("id").single();
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  await writeAuditLog({
-    actorId: user.id,
-    action: "payment.added",
-    entityType: "payment",
-    entityId: data.id,
-    details: payload,
-  });
+  await db.transaction((tx) => [
+    tx`
+      insert into payments (
+        id, school_id, license_id, amount, payment_date, due_date, payment_mode, status, notes
+      )
+      values (
+        ${id}, ${payload.school_id}, ${payload.license_id}, ${payload.amount},
+        ${payload.payment_date}, ${payload.due_date}, ${payload.payment_mode}, ${payload.status},
+        ${payload.notes}
+      )
+    `,
+    tx`
+      insert into audit_logs (id, actor_id, action, entity_type, entity_id, details)
+      values (
+        ${randomUUID()}, ${user.id}, ${"payment.added"}, ${"payment"}, ${id},
+        ${JSON.stringify(payload)}::jsonb
+      )
+    `,
+  ]);
 
   revalidatePath("/payments");
+  revalidatePath(`/schools/${payload.school_id}`);
 }
 
 export async function updatePaymentStatusAction(formData: FormData) {
   const { user } = await requireAdminPage();
-  const supabase = createSupabaseAdminClient();
+  const db = getDb();
   const id = readRequiredString(formData, "id");
   const status = readRequiredString(formData, "status");
 
-  const { error } = await supabase.from("payments").update({ status }).eq("id", id);
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  await writeAuditLog({
-    actorId: user.id,
-    action: "payment.status_updated",
-    entityType: "payment",
-    entityId: id,
-    details: { status },
-  });
+  await db.transaction((tx) => [
+    tx`
+      update payments
+      set status = ${status}
+      where id = ${id}
+    `,
+    tx`
+      insert into audit_logs (id, actor_id, action, entity_type, entity_id, details)
+      values (
+        ${randomUUID()}, ${user.id}, ${"payment.status_updated"}, ${"payment"}, ${id},
+        ${JSON.stringify({ status })}::jsonb
+      )
+    `,
+  ]);
 
   revalidatePath("/payments");
 }

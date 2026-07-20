@@ -2,84 +2,95 @@ import Link from "next/link";
 import { AlertTriangle, Building2, CheckCircle2, Clock3, CreditCard, MonitorCheck } from "lucide-react";
 import { StatusBadge } from "@/components/StatusBadge";
 import { formatDateTime } from "@/lib/format";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { queryOne, queryRows } from "@/lib/db";
 import type { AuditLog, License } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 type LicenseWithSchool = License & { schools: { school_name: string } | null };
+type CountRow = { count: number };
 
 export default async function DashboardPage() {
-  const supabase = createSupabaseAdminClient();
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
   const [
     schoolsCount,
     activeLicensesCount,
     suspendedLicensesCount,
     expiredLicensesCount,
     pendingPaymentsCount,
-    checkinsResult,
-    recentLicensesResult,
-    recentLogsResult,
+    checkedDevicesCount,
+    recentLicenses,
+    recentLogs,
   ] = await Promise.all([
-    supabase.from("schools").select("id", { count: "exact", head: true }),
-    supabase.from("licenses").select("id", { count: "exact", head: true }).eq("status", "Active"),
-    supabase.from("licenses").select("id", { count: "exact", head: true }).eq("status", "Suspended"),
-    supabase.from("licenses").select("id", { count: "exact", head: true }).or(`status.eq.Expired,expires_at.lt.${new Date().toISOString()}`),
-    supabase.from("payments").select("id", { count: "exact", head: true }).in("status", ["Pending", "Overdue"]),
-    supabase.from("license_checkins").select("device_id,license_id,status_returned,checked_at").gte("checked_at", today.toISOString()),
-    supabase
-      .from("licenses")
-      .select("license_id,plan,status,expires_at,created_at,schools(school_name)")
-      .order("created_at", { ascending: false })
-      .limit(6),
-    supabase.from("audit_logs").select("*").order("created_at", { ascending: false }).limit(8),
+    queryOne<CountRow>("select count(*)::int as count from schools"),
+    queryOne<CountRow>("select count(*)::int as count from licenses where status = 'Active'"),
+    queryOne<CountRow>("select count(*)::int as count from licenses where status = 'Suspended'"),
+    queryOne<CountRow>(
+      "select count(*)::int as count from licenses where status = 'Expired' or expires_at < now()",
+    ),
+    queryOne<CountRow>("select count(*)::int as count from payments where status in ('Pending', 'Overdue')"),
+    queryOne<CountRow>(
+      "select count(distinct device_id)::int as count from license_checkins where checked_at >= date_trunc('day', now())",
+    ),
+    queryRows<LicenseWithSchool>(
+      `select
+         l.license_id,
+         l.plan,
+         l.status,
+         l.expires_at,
+         l.created_at,
+         case when s.id is null then null else json_build_object('school_name', s.school_name) end as schools
+       from licenses l
+       left join schools s on s.id = l.school_id
+       order by l.created_at desc
+       limit 6`,
+    ),
+    queryRows<AuditLog>(
+      `select *
+       from audit_logs
+       order by created_at desc
+       limit 8`,
+    ),
   ]);
 
-  const checkedDevices = new Set((checkinsResult.data ?? []).map((row) => row.device_id).filter(Boolean));
-  const recentLicenses = (recentLicensesResult.data ?? []) as unknown as LicenseWithSchool[];
-  const recentLogs = (recentLogsResult.data ?? []) as AuditLog[];
   const stats = [
     {
       label: "Total Schools",
-      value: schoolsCount.count ?? 0,
+      value: schoolsCount?.count ?? 0,
       icon: Building2,
       href: "/schools",
       tone: "bg-slate-950 text-white",
     },
     {
       label: "Active Licenses",
-      value: activeLicensesCount.count ?? 0,
+      value: activeLicensesCount?.count ?? 0,
       icon: CheckCircle2,
       href: "/licenses?status=Active",
       tone: "bg-emerald-600 text-white",
     },
     {
       label: "Suspended Licenses",
-      value: suspendedLicensesCount.count ?? 0,
+      value: suspendedLicensesCount?.count ?? 0,
       icon: AlertTriangle,
       href: "/licenses?status=Suspended",
       tone: "bg-amber-500 text-white",
     },
     {
       label: "Expired Licenses",
-      value: expiredLicensesCount.count ?? 0,
+      value: expiredLicensesCount?.count ?? 0,
       icon: Clock3,
       href: "/licenses?status=Expired",
       tone: "bg-zinc-700 text-white",
     },
     {
       label: "Devices Checked In Today",
-      value: checkedDevices.size,
+      value: checkedDevicesCount?.count ?? 0,
       icon: MonitorCheck,
       href: "/devices",
       tone: "bg-blue-600 text-white",
     },
     {
       label: "Pending / Overdue Payments",
-      value: pendingPaymentsCount.count ?? 0,
+      value: pendingPaymentsCount?.count ?? 0,
       icon: CreditCard,
       href: "/payments?status=Pending",
       tone: "bg-rose-600 text-white",

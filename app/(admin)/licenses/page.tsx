@@ -2,8 +2,8 @@ import { CopyButton } from "@/components/CopyButton";
 import { LicenseActions } from "@/components/LicenseActions";
 import { LicenseGenerator } from "@/components/LicenseGenerator";
 import { StatusBadge } from "@/components/StatusBadge";
+import { queryRows } from "@/lib/db";
 import { formatDateTime } from "@/lib/format";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import type { AuditLog, Device, License, School } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -25,41 +25,60 @@ export default async function LicensesPage({ searchParams }: PageProps) {
   const status = getParam(params, "status");
   const plan = getParam(params, "plan");
   const expiryBefore = getParam(params, "expiryBefore");
-  const supabase = createSupabaseAdminClient();
-  let query = supabase.from("licenses").select("*,schools(school_name)").order("created_at", { ascending: false });
+  const conditions: string[] = [];
+  const values: string[] = [];
 
   if (q) {
-    query = query.or(`license_id.ilike.%${q}%,device_id.ilike.%${q}%`);
+    values.push(`%${q}%`);
+    conditions.push(`(l.license_id ilike $${values.length} or l.device_id ilike $${values.length})`);
   }
 
   if (status) {
-    query = query.eq("status", status);
+    values.push(status);
+    conditions.push(`l.status = $${values.length}`);
   }
 
   if (plan) {
-    query = query.eq("plan", plan);
+    values.push(plan);
+    conditions.push(`l.plan = $${values.length}`);
   }
 
   if (expiryBefore) {
-    query = query.lte("expires_at", expiryBefore);
+    values.push(expiryBefore);
+    conditions.push(`l.expires_at::date <= $${values.length}::date`);
   }
 
-  const [licensesResult, schoolsResult, devicesResult, historyResult] = await Promise.all([
-    query,
-    supabase.from("schools").select("id,school_name").eq("status", "Active").order("school_name"),
-    supabase.from("devices").select("device_id").order("created_at", { ascending: false }).limit(500),
-    supabase
-      .from("audit_logs")
-      .select("*")
-      .eq("action", "license.generated")
-      .order("created_at", { ascending: false })
-      .limit(12),
+  const [licenses, schools, devices, history] = await Promise.all([
+    queryRows<LicenseWithSchool>(
+      `select
+         l.*,
+         case when s.id is null then null else json_build_object('school_name', s.school_name) end as schools
+       from licenses l
+       left join schools s on s.id = l.school_id
+       ${conditions.length ? `where ${conditions.join(" and ")}` : ""}
+       order by l.created_at desc`,
+      values,
+    ),
+    queryRows<Pick<School, "id" | "school_name">>(
+      `select id, school_name
+       from schools
+       where status = 'Active'
+       order by school_name`,
+    ),
+    queryRows<Pick<Device, "device_id">>(
+      `select device_id
+       from devices
+       order by created_at desc
+       limit 500`,
+    ),
+    queryRows<AuditLog>(
+      `select *
+       from audit_logs
+       where action = 'license.generated'
+       order by created_at desc
+       limit 12`,
+    ),
   ]);
-
-  const licenses = (licensesResult.data ?? []) as unknown as LicenseWithSchool[];
-  const schools = (schoolsResult.data ?? []) as Pick<School, "id" | "school_name">[];
-  const devices = (devicesResult.data ?? []) as Pick<Device, "device_id">[];
-  const history = (historyResult.data ?? []) as AuditLog[];
 
   return (
     <div className="space-y-6">

@@ -1,13 +1,25 @@
 import { formatDateTime } from "@/lib/format";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { queryRows } from "@/lib/db";
 import type { AuditLog } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
+type AuditLogWithActor = AuditLog & {
+  actor_email: string | null;
+  actor_name: string | null;
+};
+
 export default async function AuditLogsPage() {
-  const supabase = createSupabaseAdminClient();
-  const { data } = await supabase.from("audit_logs").select("*").order("created_at", { ascending: false }).limit(250);
-  const logs = (data ?? []) as AuditLog[];
+  const logs = await queryRows<AuditLogWithActor>(
+    `select
+       a.*,
+       u.email as actor_email,
+       u.full_name as actor_name
+     from audit_logs a
+     left join admin_users u on u.id = a.actor_id
+     order by a.created_at desc
+     limit 250`,
+  );
 
   return (
     <div className="space-y-6">
@@ -36,7 +48,10 @@ export default async function AuditLogsPage() {
                     <div>{log.entity_type ?? "system"}</div>
                     <div className="font-mono text-xs text-slate-500">{log.entity_id ?? ""}</div>
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs">{log.actor_id ?? "system"}</td>
+                  <td className="px-4 py-3">
+                    <div className="text-xs font-semibold">{log.actor_name ?? log.actor_email ?? "system"}</div>
+                    <div className="font-mono text-xs text-slate-500">{log.actor_id ?? ""}</div>
+                  </td>
                   <td className="px-4 py-3">
                     <pre className="max-h-28 max-w-xl overflow-auto rounded-md bg-slate-50 p-2 text-xs text-slate-700">
                       {JSON.stringify(log.details ?? {}, null, 2)}

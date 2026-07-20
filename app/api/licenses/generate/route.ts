@@ -1,21 +1,29 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { requireAdminApi } from "@/lib/auth";
-import { writeAuditLog } from "@/lib/audit";
-import { jsonError, normalizeDateInput, readBodyNumber, requireBodyString } from "@/lib/api";
-import { createLicenseId, signLicensePayload } from "@/lib/license";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { jsonError, normalizeDateInput, readBodyNumber, readBodyString, requireBodyString } from "@/lib/api";
+import { getDb, queryOne } from "@/lib/db";
+import { createLicenseId, normalizeLicenseDeviceId, signLicensePayload } from "@/lib/license";
 import type { School } from "@/lib/types";
 
 export const runtime = "nodejs";
 
 const allowedPlans = new Set(["Trial", "Monthly", "Annual", "Lifetime"]);
 
+type SchoolForLicense = Pick<School, "id" | "school_name" | "phone" | "email" | "status">;
+
+type ExistingDevice = {
+  device_id: string;
+  school_id: string | null;
+  status: string;
+};
+
 export async function POST(request: Request) {
   try {
     const { user } = await requireAdminApi();
     const body = (await request.json()) as Record<string, unknown>;
     const schoolId = requireBodyString(body, "schoolId");
-    const deviceId = requireBodyString(body, "deviceId");
+    const deviceId = normalizeLicenseDeviceId(requireBodyString(body, "deviceId"));
     const plan = requireBodyString(body, "plan");
 
     if (!allowedPlans.has(plan)) {
@@ -23,113 +31,122 @@ export async function POST(request: Request) {
     }
 
     const maxUsers = readBodyNumber(body, "maxUsers", 10);
-    const expiresAt = normalizeDateInput(typeof body.expiresAt === "string" ? body.expiresAt : null);
-    const maintenanceUntil = normalizeDateInput(
-      typeof body.maintenanceUntil === "string" ? body.maintenanceUntil : null,
-    );
-    const features =
-      body.features && typeof body.features === "object" && !Array.isArray(body.features)
-        ? (body.features as Record<string, unknown>)
-        : {};
-    const supabase = createSupabaseAdminClient();
-    const { data: school, error: schoolError } = await supabase
-      .from("schools")
-      .select("id,school_name,status")
-      .eq("id", schoolId)
-      .maybeSingle<Pick<School, "id" | "school_name" | "status">>();
+    const expiresAtInput = readBodyString(body, "expiresAt");
+    const maintenanceUntilInput = readBodyString(body, "maintenanceUntil");
 
-    if (schoolError) {
-      throw new Error(schoolError.message);
+    if (!expiresAtInput) {
+      return NextResponse.json({ error: "expiresAt is required" }, { status: 400 });
     }
+
+    if (!maintenanceUntilInput) {
+      return NextResponse.json({ error: "maintenanceUntil is required" }, { status: 400 });
+    }
+
+    const expiresAt = normalizeDateInput(expiresAtInput);
+    const maintenanceUntil = normalizeDateInput(maintenanceUntilInput);
+
+    if (!expiresAt || !maintenanceUntil) {
+      return NextResponse.json({ error: "License dates are required" }, { status: 400 });
+    }
+
+    const rawFeatures = body.features;
+    const features = Array.isArray(rawFeatures)
+      ? rawFeatures.map((feature) => (typeof feature === "string" ? feature.trim() : "")).filter(Boolean)
+      : rawFeatures && typeof rawFeatures === "object"
+        ? Object.entries(rawFeatures)
+            .filter(([, enabled]) => Boolean(enabled))
+            .map(([feature]) => feature.trim())
+            .filter(Boolean)
+        : ["all"];
+    const normalizedFeatures = features.length ? features : ["all"];
+    const school = await queryOne<SchoolForLicense>(
+      `select id, school_name, phone, email, status
+       from schools
+       where id = $1`,
+      [schoolId],
+    );
 
     if (!school) {
       return NextResponse.json({ error: "School not found" }, { status: 404 });
     }
 
-    const { data: existingDevice, error: deviceLookupError } = await supabase
-      .from("devices")
-      .select("device_id,school_id,status")
-      .eq("device_id", deviceId)
-      .maybeSingle<{ device_id: string; school_id: string | null; status: string }>();
+    const existingDevice = await queryOne<ExistingDevice>(
+      `select device_id, school_id, status
+       from devices
+       where device_id = $1`,
+      [deviceId],
+    );
 
-    if (deviceLookupError) {
-      throw new Error(deviceLookupError.message);
-    }
-
-    if (existingDevice && existingDevice.school_id && existingDevice.school_id !== schoolId) {
+    if (existingDevice?.school_id && existingDevice.school_id !== schoolId) {
       return NextResponse.json({ error: "Device ID already belongs to another school" }, { status: 409 });
-    }
-
-    if (!existingDevice) {
-      const { error: insertDeviceError } = await supabase.from("devices").insert({
-        school_id: schoolId,
-        device_id: deviceId,
-        status: "Active",
-      });
-
-      if (insertDeviceError) {
-        throw new Error(insertDeviceError.message);
-      }
-    } else if (!existingDevice.school_id) {
-      const { error: updateDeviceError } = await supabase
-        .from("devices")
-        .update({ school_id: schoolId })
-        .eq("device_id", deviceId);
-
-      if (updateDeviceError) {
-        throw new Error(updateDeviceError.message);
-      }
     }
 
     const issuedAt = new Date().toISOString();
     const licenseId = createLicenseId();
     const payload = {
       licenseId,
-      schoolId,
+      schoolName: school.school_name,
       deviceId,
       plan,
       issuedAt,
       expiresAt,
       maintenanceUntil,
       maxUsers,
-      features,
+      features: normalizedFeatures,
+      ...(school.phone ? { customerPhone: school.phone.trim() } : {}),
+      ...(school.email ? { customerEmail: school.email.trim() } : {}),
     };
     const licenseKey = signLicensePayload(payload);
-    const { error: insertLicenseError } = await supabase.from("licenses").insert({
-      license_id: licenseId,
-      school_id: schoolId,
-      device_id: deviceId,
-      plan,
-      status: "Active",
-      issued_at: issuedAt,
-      expires_at: expiresAt,
-      maintenance_until: maintenanceUntil,
-      max_users: maxUsers,
-      features,
-      license_key: licenseKey,
-      created_by: user.id,
-    });
+    const db = getDb();
 
-    if (insertLicenseError) {
-      throw new Error(insertLicenseError.message);
-    }
+    await db.transaction((tx) => {
+      const statements = [];
 
-    await writeAuditLog({
-      actorId: user.id,
-      action: "license.generated",
-      entityType: "license",
-      entityId: licenseId,
-      details: {
-        licenseId,
-        schoolId,
-        schoolName: school.school_name,
-        deviceId,
-        plan,
-        expiresAt,
-        maintenanceUntil,
-        maxUsers,
-        features,
-      },
+      if (!existingDevice) {
+        statements.push(tx`
+          insert into devices (id, school_id, device_id, status)
+          values (${randomUUID()}, ${schoolId}, ${deviceId}, ${"Active"})
+        `);
+      } else if (!existingDevice.school_id) {
+        statements.push(tx`
+          update devices
+          set school_id = ${schoolId}
+          where device_id = ${deviceId}
+        `);
+      }
+
+      statements.push(
+        tx`
+          insert into licenses (
+            id, license_id, school_id, device_id, plan, status, issued_at, expires_at,
+            maintenance_until, max_users, features, license_key, created_by
+          )
+          values (
+            ${randomUUID()}, ${licenseId}, ${schoolId}, ${deviceId}, ${plan}, ${"Active"}, ${issuedAt},
+            ${expiresAt}, ${maintenanceUntil}, ${maxUsers}, ${JSON.stringify(normalizedFeatures)}::jsonb,
+            ${licenseKey}, ${user.id}
+          )
+        `,
+        tx`
+          insert into audit_logs (id, actor_id, action, entity_type, entity_id, details)
+          values (
+            ${randomUUID()}, ${user.id}, ${"license.generated"}, ${"license"}, ${licenseId},
+            ${JSON.stringify({
+              licenseId,
+              schoolId,
+              schoolName: school.school_name,
+              deviceId,
+              plan,
+              expiresAt,
+              maintenanceUntil,
+              maxUsers,
+              features: normalizedFeatures,
+            })}::jsonb
+          )
+        `,
+      );
+
+      return statements;
     });
 
     return NextResponse.json({ licenseKey, licenseId });

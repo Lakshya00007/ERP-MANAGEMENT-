@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getRequestIp, readBodyString, requireBodyString } from "@/lib/api";
+import { getDb, queryOne } from "@/lib/db";
 import { decodeLicensePayload } from "@/lib/license";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import type { License } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -18,16 +19,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ activated: false, valid: false, message: "Invalid license key" }, { status: 400 });
   }
 
-  const supabase = createSupabaseAdminClient();
-  const { data: license, error } = await supabase
-    .from("licenses")
-    .select("*")
-    .eq("license_id", payload.licenseId)
-    .maybeSingle<License>();
-
-  if (error) {
-    return NextResponse.json({ activated: false, valid: false, message: error.message }, { status: 500 });
-  }
+  const license = await queryOne<License>(
+    `select *
+     from licenses
+     where license_id = $1`,
+    [payload.licenseId],
+  );
 
   if (!license) {
     return NextResponse.json({ activated: false, valid: false, message: "License not found" }, { status: 404 });
@@ -37,26 +34,27 @@ export async function POST(request: Request) {
     return NextResponse.json({ activated: false, valid: false, message: "Device mismatch" }, { status: 409 });
   }
 
-  await supabase.from("license_checkins").insert({
-    license_id: license.license_id,
-    device_id: deviceId,
-    school_id: license.school_id,
-    status_returned: `Activation${license.status}`,
-    app_version: appVersion,
-    os,
-    ip_address: getRequestIp(request),
-    notes: "Activation endpoint",
-  });
-
-  await supabase
-    .from("devices")
-    .update({
-      app_version: appVersion,
-      os,
-      last_seen_at: new Date().toISOString(),
-      last_ip: getRequestIp(request),
-    })
-    .eq("device_id", deviceId);
+  const ipAddress = getRequestIp(request);
+  const db = getDb();
+  await db.transaction((tx) => [
+    tx`
+      insert into license_checkins (
+        id, license_id, device_id, school_id, status_returned, app_version, os, ip_address, notes
+      )
+      values (
+        ${randomUUID()}, ${license.license_id}, ${deviceId}, ${license.school_id},
+        ${`Activation${license.status}`}, ${appVersion}, ${os}, ${ipAddress}, ${"Activation endpoint"}
+      )
+    `,
+    tx`
+      update devices
+      set app_version = ${appVersion},
+          os = ${os},
+          last_seen_at = now(),
+          last_ip = ${ipAddress}
+      where device_id = ${deviceId}
+    `,
+  ]);
 
   return NextResponse.json({
     activated: license.status === "Active",

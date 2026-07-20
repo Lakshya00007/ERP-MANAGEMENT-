@@ -39,7 +39,7 @@ export type License = {
   expires_at: string | null;
   maintenance_until: string | null;
   max_users: number;
-  features: Record<string, unknown> | null;
+  features: string[] | null;
   license_key: string | null;
   suspend_reason: string | null;
   revoked_reason: string | null;

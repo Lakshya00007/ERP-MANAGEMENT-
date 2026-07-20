@@ -1,8 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { requireAdminApi } from "@/lib/auth";
-import { writeAuditLog } from "@/lib/audit";
 import { jsonError, normalizeDateInput, readBodyString } from "@/lib/api";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { getDb, queryOne } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -16,26 +16,34 @@ export async function PATCH(request: Request, context: RouteContext) {
     const { licenseId } = await context.params;
     const body = (await request.json()) as Record<string, unknown>;
     const expiresAt = normalizeDateInput(readBodyString(body, "expiresAt"));
-    const supabase = createSupabaseAdminClient();
-    const update: Record<string, unknown> = { expires_at: expiresAt };
+    const current = await queryOne<{ license_id: string }>(
+      `select license_id
+       from licenses
+       where license_id = $1`,
+      [licenseId],
+    );
 
-    if (expiresAt && new Date(expiresAt).getTime() >= Date.now()) {
-      update.status = "Active";
+    if (!current) {
+      return NextResponse.json({ error: "License not found" }, { status: 404 });
     }
 
-    const { error } = await supabase.from("licenses").update(update).eq("license_id", licenseId);
-
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    await writeAuditLog({
-      actorId: user.id,
-      action: "license.renewed",
-      entityType: "license",
-      entityId: licenseId,
-      details: { expiresAt },
-    });
+    const nextStatus = expiresAt && new Date(expiresAt).getTime() >= Date.now() ? "Active" : null;
+    const db = getDb();
+    await db.transaction((tx) => [
+      tx`
+        update licenses
+        set expires_at = ${expiresAt},
+            status = coalesce(${nextStatus}, status)
+        where license_id = ${licenseId}
+      `,
+      tx`
+        insert into audit_logs (id, actor_id, action, entity_type, entity_id, details)
+        values (
+          ${randomUUID()}, ${user.id}, ${"license.renewed"}, ${"license"}, ${licenseId},
+          ${JSON.stringify({ expiresAt })}::jsonb
+        )
+      `,
+    ]);
 
     return NextResponse.json({ message: "License expiry updated" });
   } catch (error) {

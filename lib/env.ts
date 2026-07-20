@@ -8,20 +8,26 @@ export function getRequiredEnv(name: string) {
   return value;
 }
 
-export function getSupabasePublicConfig() {
-  return {
-    url: getRequiredEnv("NEXT_PUBLIC_SUPABASE_URL"),
-    anonKey: getRequiredEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY"),
-  };
+export function getDatabaseUrl() {
+  return getRequiredEnv("DATABASE_URL");
 }
 
-export function getSupabaseServiceConfig() {
-  return {
-    url: getRequiredEnv("NEXT_PUBLIC_SUPABASE_URL"),
-    serviceRoleKey: getRequiredEnv("SUPABASE_SERVICE_ROLE_KEY"),
-  };
+export function getAuthSecret() {
+  const secret = getRequiredEnv("AUTH_SECRET");
+
+  if (secret.length < 32) {
+    throw new Error("AUTH_SECRET must be at least 32 characters long");
+  }
+
+  return secret;
 }
 
 export function getLicensePrivateKey() {
-  return getRequiredEnv("LICENSE_PRIVATE_KEY").replace(/\\n/g, "\n");
+  const value = process.env.LICENSE_PRIVATE_KEY;
+
+  if (!value) {
+    throw new Error("LICENSE_PRIVATE_KEY is missing");
+  }
+
+  return value.replace(/\\n/g, "\n").trim();
 }

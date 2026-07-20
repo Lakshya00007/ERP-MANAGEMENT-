@@ -7,33 +7,63 @@ Private Next.js admin panel for Vidhya Tech to manage Vidhya School ERP licenses
 - Next.js App Router
 - TypeScript
 - Tailwind CSS
-- Supabase PostgreSQL
-- Supabase Auth
+- Neon PostgreSQL
+- `@neondatabase/serverless`
+- Custom admin authentication with bcrypt password hashes and HTTP-only session cookies
 - Server-side API routes
 - Vercel-ready deployment
 
 ## Setup
 
-1. Install dependencies:
+1. Create a Neon PostgreSQL project.
+2. Copy the Neon `DATABASE_URL`.
+3. Create `.env.local`:
+
+```bash
+cp .env.example .env.local
+```
+
+Set:
+
+```bash
+DATABASE_URL="postgres://..."
+AUTH_SECRET="use-a-random-32-plus-character-secret"
+LICENSE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+```
+
+4. Install dependencies:
 
 ```bash
 npm install
 ```
 
-2. Create a Supabase project and run:
+5. Run database migrations:
 
-```sql
-supabase/migrations/001_initial_schema.sql
+```bash
+npm run db:migrate
 ```
 
-3. Create an auth user in Supabase Auth, then seed the first admin:
+6. Create the first admin:
 
-```sql
-insert into public.admin_users (user_id, email, full_name, role, status)
-values ('AUTH_USER_UUID', 'admin@vidhyatech.example', 'Vidhya Admin', 'Owner', 'Active');
+```bash
+npm run admin:create -- --email "teamvidhyatech@gmail.com" --name "Lakshya Gupta" --role "Owner"
 ```
 
-4. Generate a private/public RSA key pair:
+The script prompts for the password and stores only a bcrypt hash.
+
+7. Start the app:
+
+```bash
+npm run dev
+```
+
+8. Open `http://localhost:3000` and log in with the created admin account.
+9. Deploy to Vercel.
+10. Add `DATABASE_URL`, `AUTH_SECRET`, and `LICENSE_PRIVATE_KEY` in Vercel Project Settings.
+
+## License Signing
+
+Generate a private/public RSA key pair:
 
 ```bash
 openssl genrsa -out license_private.pem 2048
@@ -43,30 +73,23 @@ openssl rsa -in license_private.pem -pubout -out license_public.pem
 
 Set `LICENSE_PRIVATE_KEY` to the PKCS8 private key. Keep it only in server environment variables. The ERP desktop app can use `license_public.pem` to verify signatures.
 
-5. Copy `.env.example` to `.env.local` and fill values:
+## Scripts
 
-```bash
-cp .env.example .env.local
-```
-
-Use `\n` escapes for `LICENSE_PRIVATE_KEY` if storing it as a single line.
-
-6. Run locally:
-
-```bash
-npm run dev
-```
-
-Open `http://localhost:3000` and sign in with the seeded admin user.
+- `npm run dev` starts Next.js with webpack.
+- `npm run db:migrate` applies SQL migrations once, tracked in `schema_migrations`.
+- `npm run admin:create` creates or updates an admin user.
+- `npm run db:verify` runs rollback-only database checks using test-prefixed records.
+- `npm run typecheck`, `npm run lint`, and `npm run build` validate the app.
 
 ## Required Environment Variables
 
-- `NEXT_PUBLIC_SUPABASE_URL`
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-- `SUPABASE_SERVICE_ROLE_KEY`
+- `DATABASE_URL`
+- `AUTH_SECRET`
 - `LICENSE_PRIVATE_KEY`
 
-Only the two `NEXT_PUBLIC_` values are available to the browser. `SUPABASE_SERVICE_ROLE_KEY` and `LICENSE_PRIVATE_KEY` are only read by server modules/API routes.
+Optional:
+
+- `NEXT_PUBLIC_APP_NAME`
 
 ## License APIs
 
@@ -120,17 +143,8 @@ Returns active, suspended, revoked, expired, mismatch, or not-found status. Ever
 ## Security Notes
 
 - The private signing key is never imported by client components.
-- Admin pages require Supabase Auth plus an active row in `admin_users`.
-- Server mutations use the Supabase service role after admin authorization.
-- RLS policies are enabled for direct Supabase access.
+- `DATABASE_URL`, `AUTH_SECRET`, and `LICENSE_PRIVATE_KEY` are server-only.
+- Admin passwords are stored as bcrypt hashes.
+- Admin sessions are signed with `jose` and stored in HTTP-only cookies.
+- Authorization is enforced in server-side application code.
 - License generation, suspension, reactivation, revocation, renewal, maintenance changes, payment updates, school updates, and device status changes are audit logged.
-
-## Vercel Deployment
-
-Create the same environment variables in Vercel Project Settings, then deploy normally:
-
-```bash
-npm run build
-```
-
-The app uses standard Next.js server routes and does not require exposing API secrets to the frontend.

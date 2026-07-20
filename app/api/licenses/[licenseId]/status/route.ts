@@ -1,13 +1,18 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { requireAdminApi } from "@/lib/auth";
-import { writeAuditLog } from "@/lib/audit";
 import { jsonError, readBodyString, requireBodyString } from "@/lib/api";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
+import { getDb, queryOne } from "@/lib/db";
 
 export const runtime = "nodejs";
 
 type RouteContext = {
   params: Promise<{ licenseId: string }>;
+};
+
+type LicenseStatusRow = {
+  license_id: string;
+  status: string;
 };
 
 export async function PATCH(request: Request, context: RouteContext) {
@@ -17,16 +22,12 @@ export async function PATCH(request: Request, context: RouteContext) {
     const body = (await request.json()) as Record<string, unknown>;
     const action = requireBodyString(body, "action");
     const reason = readBodyString(body, "reason");
-    const supabase = createSupabaseAdminClient();
-    const { data: current, error: currentError } = await supabase
-      .from("licenses")
-      .select("license_id,status")
-      .eq("license_id", licenseId)
-      .maybeSingle<{ license_id: string; status: string }>();
-
-    if (currentError) {
-      throw new Error(currentError.message);
-    }
+    const current = await queryOne<LicenseStatusRow>(
+      `select license_id, status
+       from licenses
+       where license_id = $1`,
+      [licenseId],
+    );
 
     if (!current) {
       return NextResponse.json({ error: "License not found" }, { status: 404 });
@@ -36,40 +37,73 @@ export async function PATCH(request: Request, context: RouteContext) {
       return NextResponse.json({ error: "Revoked licenses cannot be reactivated" }, { status: 409 });
     }
 
-    let update: Record<string, unknown>;
+    let updateStatus: "Active" | "Suspended" | "Revoked";
+    let suspendReason: string | null | undefined;
+    let revokedReason: string | null | undefined;
     let auditAction: string;
 
     if (action === "suspend") {
       if (!reason) {
         return NextResponse.json({ error: "Reason is required" }, { status: 400 });
       }
-      update = { status: "Suspended", suspend_reason: reason };
+      updateStatus = "Suspended";
+      suspendReason = reason;
       auditAction = "license.suspended";
     } else if (action === "revoke") {
       if (!reason) {
         return NextResponse.json({ error: "Reason is required" }, { status: 400 });
       }
-      update = { status: "Revoked", revoked_reason: reason };
+      updateStatus = "Revoked";
+      revokedReason = reason;
       auditAction = "license.revoked";
     } else if (action === "reactivate") {
-      update = { status: "Active", suspend_reason: null };
+      updateStatus = "Active";
+      suspendReason = null;
       auditAction = "license.reactivated";
     } else {
       return NextResponse.json({ error: "Invalid license action" }, { status: 400 });
     }
 
-    const { error } = await supabase.from("licenses").update(update).eq("license_id", licenseId);
+    const details = {
+      previousStatus: current.status,
+      status: updateStatus,
+      suspend_reason: suspendReason,
+      revoked_reason: revokedReason,
+    };
+    const db = getDb();
+    await db.transaction((tx) => {
+      const update =
+        action === "suspend"
+          ? tx`
+              update licenses
+              set status = ${updateStatus},
+                  suspend_reason = ${suspendReason}
+              where license_id = ${licenseId}
+            `
+          : action === "revoke"
+            ? tx`
+                update licenses
+                set status = ${updateStatus},
+                    revoked_reason = ${revokedReason}
+                where license_id = ${licenseId}
+              `
+            : tx`
+                update licenses
+                set status = ${updateStatus},
+                    suspend_reason = ${null}
+                where license_id = ${licenseId}
+              `;
 
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    await writeAuditLog({
-      actorId: user.id,
-      action: auditAction,
-      entityType: "license",
-      entityId: licenseId,
-      details: { previousStatus: current.status, ...update },
+      return [
+        update,
+        tx`
+          insert into audit_logs (id, actor_id, action, entity_type, entity_id, details)
+          values (
+            ${randomUUID()}, ${user.id}, ${auditAction}, ${"license"}, ${licenseId},
+            ${JSON.stringify(details)}::jsonb
+          )
+        `,
+      ];
     });
 
     return NextResponse.json({ message: "License updated" });

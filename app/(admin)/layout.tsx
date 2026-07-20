@@ -10,5 +10,5 @@ export default async function AdminLayout({
 }>) {
   const { user, admin } = await requireAdminPage();
 
-  return <AdminShell adminEmail={admin.email ?? user.email ?? "Admin"}>{children}</AdminShell>;
+  return <AdminShell adminEmail={admin.email ?? user.email}>{children}</AdminShell>;
 }

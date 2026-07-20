@@ -1,7 +1,7 @@
 import { updateDeviceStatusAction, createDeviceAction } from "@/lib/actions";
 import { StatusBadge } from "@/components/StatusBadge";
+import { queryRows } from "@/lib/db";
 import { formatDateTime } from "@/lib/format";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import type { Device, School } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -21,23 +21,39 @@ export default async function DevicesPage({ searchParams }: PageProps) {
   const params = await searchParams;
   const q = getParam(params, "q");
   const status = getParam(params, "status");
-  const supabase = createSupabaseAdminClient();
-  let query = supabase.from("devices").select("*,schools(school_name)").order("created_at", { ascending: false });
+  const conditions: string[] = [];
+  const values: string[] = [];
 
   if (q) {
-    query = query.or(`device_id.ilike.%${q}%,device_name.ilike.%${q}%,os.ilike.%${q}%`);
+    values.push(`%${q}%`);
+    conditions.push(
+      `(d.device_id ilike $${values.length} or d.device_name ilike $${values.length} or d.os ilike $${values.length})`,
+    );
   }
 
   if (status) {
-    query = query.eq("status", status);
+    values.push(status);
+    conditions.push(`d.status = $${values.length}`);
   }
 
-  const [devicesResult, schoolsResult] = await Promise.all([
-    query,
-    supabase.from("schools").select("id,school_name").eq("status", "Active").order("school_name"),
+  const [devices, schools] = await Promise.all([
+    queryRows<DeviceWithSchool>(
+      `select
+         d.*,
+         case when s.id is null then null else json_build_object('school_name', s.school_name) end as schools
+       from devices d
+       left join schools s on s.id = d.school_id
+       ${conditions.length ? `where ${conditions.join(" and ")}` : ""}
+       order by d.created_at desc`,
+      values,
+    ),
+    queryRows<Pick<School, "id" | "school_name">>(
+      `select id, school_name
+       from schools
+       where status = 'Active'
+       order by school_name`,
+    ),
   ]);
-  const devices = (devicesResult.data ?? []) as unknown as DeviceWithSchool[];
-  const schools = (schoolsResult.data ?? []) as Pick<School, "id" | "school_name">[];
 
   return (
     <div className="space-y-6">

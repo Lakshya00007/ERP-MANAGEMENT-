@@ -2,8 +2,8 @@ import Link from "next/link";
 import { Plus } from "lucide-react";
 import { StatusBadge } from "@/components/StatusBadge";
 import { createSchoolAction } from "@/lib/actions";
+import { queryRows } from "@/lib/db";
 import { formatDateTime } from "@/lib/format";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import type { School } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -21,19 +21,28 @@ export default async function SchoolsPage({ searchParams }: PageProps) {
   const params = await searchParams;
   const q = getParam(params, "q");
   const status = getParam(params, "status");
-  const supabase = createSupabaseAdminClient();
-  let query = supabase.from("schools").select("*").order("created_at", { ascending: false });
+  const conditions: string[] = [];
+  const values: string[] = [];
 
   if (q) {
-    query = query.or(`school_name.ilike.%${q}%,city.ilike.%${q}%,email.ilike.%${q}%,phone.ilike.%${q}%`);
+    values.push(`%${q}%`);
+    conditions.push(
+      `(school_name ilike $${values.length} or city ilike $${values.length} or email ilike $${values.length} or phone ilike $${values.length})`,
+    );
   }
 
   if (status) {
-    query = query.eq("status", status);
+    values.push(status);
+    conditions.push(`status = $${values.length}`);
   }
 
-  const { data } = await query;
-  const schools = (data ?? []) as School[];
+  const schools = await queryRows<School>(
+    `select *
+     from schools
+     ${conditions.length ? `where ${conditions.join(" and ")}` : ""}
+     order by created_at desc`,
+    values,
+  );
 
   return (
     <div className="space-y-6">

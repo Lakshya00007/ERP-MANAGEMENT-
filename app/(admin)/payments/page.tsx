@@ -1,7 +1,7 @@
 import { createPaymentAction, updatePaymentStatusAction } from "@/lib/actions";
 import { StatusBadge } from "@/components/StatusBadge";
+import { queryRows } from "@/lib/db";
 import { formatDateTime } from "@/lib/format";
-import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import type { License, Payment, School } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -20,21 +20,37 @@ function getParam(searchParams: Record<string, string | string[] | undefined>, k
 export default async function PaymentsPage({ searchParams }: PageProps) {
   const params = await searchParams;
   const status = getParam(params, "status");
-  const supabase = createSupabaseAdminClient();
-  let query = supabase.from("payments").select("*,schools(school_name)").order("created_at", { ascending: false });
+  const conditions: string[] = [];
+  const values: string[] = [];
 
   if (status) {
-    query = query.eq("status", status);
+    values.push(status);
+    conditions.push(`p.status = $${values.length}`);
   }
 
-  const [paymentsResult, schoolsResult, licensesResult] = await Promise.all([
-    query,
-    supabase.from("schools").select("id,school_name").order("school_name"),
-    supabase.from("licenses").select("license_id,school_id,status").order("created_at", { ascending: false }).limit(500),
+  const [payments, schools, licenses] = await Promise.all([
+    queryRows<PaymentWithSchool>(
+      `select
+         p.*,
+         case when s.id is null then null else json_build_object('school_name', s.school_name) end as schools
+       from payments p
+       left join schools s on s.id = p.school_id
+       ${conditions.length ? `where ${conditions.join(" and ")}` : ""}
+       order by p.created_at desc`,
+      values,
+    ),
+    queryRows<Pick<School, "id" | "school_name">>(
+      `select id, school_name
+       from schools
+       order by school_name`,
+    ),
+    queryRows<Pick<License, "license_id" | "school_id" | "status">>(
+      `select license_id, school_id, status
+       from licenses
+       order by created_at desc
+       limit 500`,
+    ),
   ]);
-  const payments = (paymentsResult.data ?? []) as unknown as PaymentWithSchool[];
-  const schools = (schoolsResult.data ?? []) as Pick<School, "id" | "school_name">[];
-  const licenses = (licensesResult.data ?? []) as Pick<License, "license_id" | "school_id" | "status">[];
 
   return (
     <div className="space-y-6">

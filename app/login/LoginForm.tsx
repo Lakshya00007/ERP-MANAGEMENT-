@@ -3,7 +3,6 @@
 import { FormEvent, useState } from "react";
 import { LockKeyhole, Mail } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 export function LoginForm() {
   const router = useRouter();
@@ -18,13 +17,17 @@ export function LoginForm() {
     const formData = new FormData(event.currentTarget);
     const email = String(formData.get("email") ?? "");
     const password = String(formData.get("password") ?? "");
-    const supabase = createSupabaseBrowserClient();
-    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const body = (await response.json()) as { error?: string };
 
     setLoading(false);
 
-    if (signInError) {
-      setError(signInError.message);
+    if (!response.ok) {
+      setError(body.error ?? "Unable to sign in");
       return;
     }
 
