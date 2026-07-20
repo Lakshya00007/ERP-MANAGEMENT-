@@ -34,3 +34,5 @@ license-private-key.pem
 # Local scratch folders
 outputs/
 work/
+.vercel
+.env*
